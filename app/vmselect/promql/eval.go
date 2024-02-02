@@ -686,10 +686,7 @@ func tryGetArgRollupFuncWithMetricExpr(ae *metricsql.AggrFuncExpr) (*metricsql.F
 			return nil, nil
 		}
 		// e = rollupFunc(metricExpr)
-		return &metricsql.FuncExpr{
-			Name: fe.Name,
-			Args: []metricsql.Expr{me},
-		}, nrf
+		return fe, nrf
 	}
 	if re, ok := arg.(*metricsql.RollupExpr); ok {
 		if me, ok := re.Expr.(*metricsql.MetricExpr); !ok || me.IsEmpty() || re.ForSubquery() {
@@ -929,7 +926,7 @@ func evalRollupFuncWithSubquery(qt *querytracer.Tracer, ec *EvalConfig, funcName
 	}
 
 	ecSQ := copyEvalConfig(ec)
-	ecSQ.Start -= window + maxSilenceInterval + step
+	ecSQ.Start -= window + step + maxSilenceInterval()
 	ecSQ.End += step
 	ecSQ.Step = step
 	ecSQ.MaxPointsPerSeries = *maxPointsSubqueryPerTimeseries
@@ -1268,7 +1265,7 @@ func evalInstantRollup(qt *querytracer.Tracer, ec *EvalConfig, funcName string, 
 			return evalAt(qtChild, timestamp, window)
 		}
 		// Calculate the result
-		tss, ok := getMaxInstantValues(qtChild, tssCached, tssStart, tssEnd)
+		tss, ok := getMaxInstantValues(qtChild, tssCached, tssStart, tssEnd, timestamp)
 		if !ok {
 			qtChild.Printf("cannot apply instant rollup optimization, since tssEnd contains bigger values than tssCached")
 			deleteCachedSeries(qtChild)
@@ -1330,7 +1327,7 @@ func evalInstantRollup(qt *querytracer.Tracer, ec *EvalConfig, funcName string, 
 			return evalAt(qtChild, timestamp, window)
 		}
 		// Calculate the result
-		tss, ok := getMinInstantValues(qtChild, tssCached, tssStart, tssEnd)
+		tss, ok := getMinInstantValues(qtChild, tssCached, tssStart, tssEnd, timestamp)
 		if !ok {
 			qtChild.Printf("cannot apply instant rollup optimization, since tssEnd contains smaller values than tssCached")
 			deleteCachedSeries(qtChild)
@@ -1395,7 +1392,7 @@ func evalInstantRollup(qt *querytracer.Tracer, ec *EvalConfig, funcName string, 
 			return evalAt(qtChild, timestamp, window)
 		}
 		// Calculate the result
-		tss := getSumInstantValues(qtChild, tssCached, tssStart, tssEnd)
+		tss := getSumInstantValues(qtChild, tssCached, tssStart, tssEnd, timestamp)
 		return tss, nil
 	default:
 		qt.Printf("instant rollup optimization isn't implemented for %s()", funcName)
@@ -1422,8 +1419,8 @@ func hasDuplicateSeries(tss []*timeseries) bool {
 	return false
 }
 
-func getMinInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*timeseries) ([]*timeseries, bool) {
-	qt = qt.NewChild("calculate the minimum for instant values across series; cached=%d, start=%d, end=%d", len(tssCached), len(tssStart), len(tssEnd))
+func getMinInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*timeseries, timestamp int64) ([]*timeseries, bool) {
+	qt = qt.NewChild("calculate the minimum for instant values across series; cached=%d, start=%d, end=%d, timestamp=%d", len(tssCached), len(tssStart), len(tssEnd), timestamp)
 	defer qt.Done()
 
 	getMin := func(a, b float64) float64 {
@@ -1432,13 +1429,13 @@ func getMinInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*
 		}
 		return b
 	}
-	tss, ok := getMinMaxInstantValues(tssCached, tssStart, tssEnd, getMin)
+	tss, ok := getMinMaxInstantValues(tssCached, tssStart, tssEnd, timestamp, getMin)
 	qt.Printf("resulting series=%d; ok=%v", len(tss), ok)
 	return tss, ok
 }
 
-func getMaxInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*timeseries) ([]*timeseries, bool) {
-	qt = qt.NewChild("calculate the maximum for instant values across series; cached=%d, start=%d, end=%d", len(tssCached), len(tssStart), len(tssEnd))
+func getMaxInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*timeseries, timestamp int64) ([]*timeseries, bool) {
+	qt = qt.NewChild("calculate the maximum for instant values across series; cached=%d, start=%d, end=%d, timestamp=%d", len(tssCached), len(tssStart), len(tssEnd), timestamp)
 	defer qt.Done()
 
 	getMax := func(a, b float64) float64 {
@@ -1447,12 +1444,12 @@ func getMaxInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*
 		}
 		return b
 	}
-	tss, ok := getMinMaxInstantValues(tssCached, tssStart, tssEnd, getMax)
+	tss, ok := getMinMaxInstantValues(tssCached, tssStart, tssEnd, timestamp, getMax)
 	qt.Printf("resulting series=%d", len(tss))
 	return tss, ok
 }
 
-func getMinMaxInstantValues(tssCached, tssStart, tssEnd []*timeseries, f func(a, b float64) float64) ([]*timeseries, bool) {
+func getMinMaxInstantValues(tssCached, tssStart, tssEnd []*timeseries, timestamp int64, f func(a, b float64) float64) ([]*timeseries, bool) {
 	assertInstantValues(tssCached)
 	assertInstantValues(tssStart)
 	assertInstantValues(tssEnd)
@@ -1503,12 +1500,16 @@ func getMinMaxInstantValues(tssCached, tssStart, tssEnd []*timeseries, f func(a,
 	for _, ts := range m {
 		rvs = append(rvs, ts)
 	}
+
+	setInstantTimestamp(rvs, timestamp)
+
 	return rvs, true
 }
 
-// getSumInstantValues calculates tssCached + tssStart - tssEnd
-func getSumInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*timeseries) []*timeseries {
-	qt = qt.NewChild("calculate the sum for instant values across series; cached=%d, start=%d, end=%d", len(tssCached), len(tssStart), len(tssEnd))
+// getSumInstantValues aggregates tssCached, tssStart, tssEnd time series
+// into a new time series with value = tssCached + tssStart - tssEnd
+func getSumInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*timeseries, timestamp int64) []*timeseries {
+	qt = qt.NewChild("calculate the sum for instant values across series; cached=%d, start=%d, end=%d, timestamp=%d", len(tssCached), len(tssStart), len(tssEnd), timestamp)
 	defer qt.Done()
 
 	assertInstantValues(tssCached)
@@ -1553,8 +1554,17 @@ func getSumInstantValues(qt *querytracer.Tracer, tssCached, tssStart, tssEnd []*
 	for _, ts := range m {
 		rvs = append(rvs, ts)
 	}
+
+	setInstantTimestamp(rvs, timestamp)
+
 	qt.Printf("resulting series=%d", len(rvs))
 	return rvs
+}
+
+func setInstantTimestamp(tss []*timeseries, timestamp int64) {
+	for _, ts := range tss {
+		ts.Timestamps[0] = timestamp
+	}
 }
 
 func assertInstantValues(tss []*timeseries) {
@@ -1672,20 +1682,17 @@ func evalRollupFuncNoCache(qt *querytracer.Tracer, ec *EvalConfig, funcName stri
 		return nil, err
 	}
 
-	// Fetch the remaining part of the result.
+	// Fetch the result.
 	tfss := searchutils.ToTagFilterss(me.LabelFilterss)
 	tfss = searchutils.JoinTagFilterss(tfss, ec.EnforcedTagFilterss)
 	minTimestamp := ec.Start
 	if needSilenceIntervalForRollupFunc(funcName) {
-		minTimestamp -= maxSilenceInterval
+		minTimestamp -= maxSilenceInterval()
 	}
 	if window > ec.Step {
 		minTimestamp -= window
 	} else {
 		minTimestamp -= ec.Step
-	}
-	if minTimestamp < 0 {
-		minTimestamp = 0
 	}
 	sq := storage.NewSearchQuery(minTimestamp, ec.End, tfss, ec.MaxSeries)
 	rss, err := netstorage.ProcessSearchQuery(qt, sq, ec.Deadline)
@@ -1772,10 +1779,22 @@ func getRollupMemoryLimiter() *memoryLimiter {
 	return &rollupMemoryLimiter
 }
 
+func maxSilenceInterval() int64 {
+	d := minStalenessInterval.Milliseconds()
+	if d <= 0 {
+		d = 5 * 60 * 1000
+	}
+	return d
+}
+
 func needSilenceIntervalForRollupFunc(funcName string) bool {
-	// All rollup the functions, which do not rely on the previous sample
-	// before the lookbehind window (aka prevValue), do not need silence interval.
+	// All the rollup functions, which do not rely on the previous sample
+	// before the lookbehind window (aka prevValue and realPrevValue), do not need silence interval.
 	switch strings.ToLower(funcName) {
+	case "default_rollup":
+		// The default_rollup implicitly relies on the previous samples in order to fill gaps.
+		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5388
+		return true
 	case
 		"absent_over_time",
 		"avg_over_time",
@@ -1784,7 +1803,6 @@ func needSilenceIntervalForRollupFunc(funcName string) bool {
 		"count_le_over_time",
 		"count_ne_over_time",
 		"count_over_time",
-		"default_rollup",
 		"first_over_time",
 		"histogram_over_time",
 		"hoeffding_bound_lower",

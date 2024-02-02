@@ -145,6 +145,12 @@ users:
   url_map:
   - src_paths: ["/foo/bar"]
 `)
+	f(`
+users:
+- username: a
+  url_map:
+  - src_hosts: ["foobar"]
+`)
 
 	// Invalid url_prefix in url_map
 	f(`
@@ -152,6 +158,13 @@ users:
 - username: a
   url_map:
   - src_paths: ["/foo/bar"]
+    url_prefix: foo.bar
+`)
+	f(`
+users:
+- username: a
+  url_map:
+  - src_hosts: ["foobar"]
     url_prefix: foo.bar
 `)
 
@@ -163,8 +176,15 @@ users:
   - src_paths: ['/foo/bar']
     url_prefix: []
 `)
+	f(`
+users:
+- username: a
+  url_map:
+  - src_phosts: ['foobar']
+    url_prefix: []
+`)
 
-	// Missing src_paths in url_map
+	// Missing src_paths and src_hosts in url_map
 	f(`
 users:
 - username: a
@@ -178,6 +198,15 @@ users:
 - username: a
   url_map:
   - src_paths: ['fo[obar']
+    url_prefix: http://foobar
+`)
+
+	// Invalid regexp in src_hosts
+	f(`
+users:
+- username: a
+  url_map:
+  - src_hosts: ['fo[obar']
     url_prefix: http://foobar
 `)
 
@@ -200,6 +229,14 @@ users:
     url_prefix: http://foobar
     headers:
       aaa: bbb
+`)
+	// Invalid metric label name
+	f(`
+users:
+- username: foo
+  url_prefix: http://foo.bar
+  metric_labels:
+    not-prometheus-compatible: value
 `)
 }
 
@@ -250,6 +287,7 @@ users:
   - http://node2:343/bbb
   tls_insecure_skip_verify: false
   retry_status_codes: [500, 501]
+  load_balancing_policy: first_available
   drop_src_path_prefix_parts: 1
 `, map[string]*UserInfo{
 		getAuthToken("", "foo", "bar"): {
@@ -261,7 +299,8 @@ users:
 			}),
 			TLSInsecureSkipVerify:  &insecureSkipVerifyFalse,
 			RetryStatusCodes:       []int{500, 501},
-			DropSrcPathPrefixParts: 1,
+			LoadBalancingPolicy:    "first_available",
+			DropSrcPathPrefixParts: intp(1),
 		},
 	})
 
@@ -291,6 +330,7 @@ users:
   - src_paths: ["/api/v1/query","/api/v1/query_range","/api/v1/label/[^./]+/.+"]
     url_prefix: http://vmselect/select/0/prometheus
   - src_paths: ["/api/v1/write"]
+    src_hosts: ["foo\\.bar", "baz:1234"]
     url_prefix: ["http://vminsert1/insert/0/prometheus","http://vminsert2/insert/0/prometheus"]
     headers:
     - "foo: bar"
@@ -300,11 +340,12 @@ users:
 			BearerToken: "foo",
 			URLMaps: []URLMap{
 				{
-					SrcPaths:  getSrcPaths([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
+					SrcPaths:  getRegexs([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
 					URLPrefix: mustParseURL("http://vmselect/select/0/prometheus"),
 				},
 				{
-					SrcPaths: getSrcPaths([]string{"/api/v1/write"}),
+					SrcHosts: getRegexs([]string{"foo\\.bar", "baz:1234"}),
+					SrcPaths: getRegexs([]string{"/api/v1/write"}),
 					URLPrefix: mustParseURLs([]string{
 						"http://vminsert1/insert/0/prometheus",
 						"http://vminsert2/insert/0/prometheus",
@@ -328,11 +369,12 @@ users:
 			BearerToken: "foo",
 			URLMaps: []URLMap{
 				{
-					SrcPaths:  getSrcPaths([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
+					SrcPaths:  getRegexs([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
 					URLPrefix: mustParseURL("http://vmselect/select/0/prometheus"),
 				},
 				{
-					SrcPaths: getSrcPaths([]string{"/api/v1/write"}),
+					SrcHosts: getRegexs([]string{"foo\\.bar", "baz:1234"}),
+					SrcPaths: getRegexs([]string{"/api/v1/write"}),
 					URLPrefix: mustParseURLs([]string{
 						"http://vminsert1/insert/0/prometheus",
 						"http://vminsert2/insert/0/prometheus",
@@ -394,11 +436,11 @@ users:
 			BearerToken: "foo",
 			URLMaps: []URLMap{
 				{
-					SrcPaths:  getSrcPaths([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
+					SrcPaths:  getRegexs([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
 					URLPrefix: mustParseURL("http://vmselect/select/0/prometheus"),
 				},
 				{
-					SrcPaths: getSrcPaths([]string{"/api/v1/write"}),
+					SrcPaths: getRegexs([]string{"/api/v1/write"}),
 					URLPrefix: mustParseURLs([]string{
 						"http://vminsert1/insert/0/prometheus",
 						"http://vminsert2/insert/0/prometheus",
@@ -426,11 +468,11 @@ users:
 			BearerToken: "foo",
 			URLMaps: []URLMap{
 				{
-					SrcPaths:  getSrcPaths([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
+					SrcPaths:  getRegexs([]string{"/api/v1/query", "/api/v1/query_range", "/api/v1/label/[^./]+/.+"}),
 					URLPrefix: mustParseURL("http://vmselect/select/0/prometheus"),
 				},
 				{
-					SrcPaths: getSrcPaths([]string{"/api/v1/write"}),
+					SrcPaths: getRegexs([]string{"/api/v1/write"}),
 					URLPrefix: mustParseURLs([]string{
 						"http://vminsert1/insert/0/prometheus",
 						"http://vminsert2/insert/0/prometheus",
@@ -455,7 +497,41 @@ users:
 			}),
 		},
 	})
-
+	// With metric_labels
+	f(`
+users:
+- username: foo-same
+  password: baz
+  url_prefix: http://foo
+  metric_labels:
+    dc: eu
+    team: dev
+- username: foo-same
+  password: bar
+  url_prefix: https://bar/x///
+  metric_labels:
+    backend_env: test
+    team: accounting
+`, map[string]*UserInfo{
+		getAuthToken("", "foo-same", "baz"): {
+			Username:  "foo-same",
+			Password:  "baz",
+			URLPrefix: mustParseURL("http://foo"),
+			MetricLabels: map[string]string{
+				"dc":   "eu",
+				"team": "dev",
+			},
+		},
+		getAuthToken("", "foo-same", "bar"): {
+			Username:  "foo-same",
+			Password:  "bar",
+			URLPrefix: mustParseURL("https://bar/x"),
+			MetricLabels: map[string]string{
+				"backend_env": "test",
+				"team":        "accounting",
+			},
+		},
+	})
 }
 
 func TestParseAuthConfigPassesTLSVerificationConfig(t *testing.T) {
@@ -492,6 +568,86 @@ unauthorized_user:
 	}
 }
 
+func TestUserInfoGetMetricLabels(t *testing.T) {
+	t.Run("empty-labels", func(t *testing.T) {
+		ui := &UserInfo{
+			Username: "user1",
+		}
+		labels, err := ui.getMetricLabels()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		labelsExpected := `{username="user1"}`
+		if labels != labelsExpected {
+			t.Fatalf("unexpected labels; got %s; want %s", labels, labelsExpected)
+		}
+	})
+	t.Run("non-empty-username", func(t *testing.T) {
+		ui := &UserInfo{
+			Username: "user1",
+			MetricLabels: map[string]string{
+				"env":        "prod",
+				"datacenter": "dc1",
+			},
+		}
+		labels, err := ui.getMetricLabels()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		labelsExpected := `{datacenter="dc1",env="prod",username="user1"}`
+		if labels != labelsExpected {
+			t.Fatalf("unexpected labels; got %s; want %s", labels, labelsExpected)
+		}
+	})
+	t.Run("non-empty-name", func(t *testing.T) {
+		ui := &UserInfo{
+			Name:        "user1",
+			BearerToken: "abc",
+			MetricLabels: map[string]string{
+				"env":        "prod",
+				"datacenter": "dc1",
+			},
+		}
+		labels, err := ui.getMetricLabels()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		labelsExpected := `{datacenter="dc1",env="prod",username="user1"}`
+		if labels != labelsExpected {
+			t.Fatalf("unexpected labels; got %s; want %s", labels, labelsExpected)
+		}
+	})
+	t.Run("non-empty-bearer-token", func(t *testing.T) {
+		ui := &UserInfo{
+			BearerToken: "abc",
+			MetricLabels: map[string]string{
+				"env":        "prod",
+				"datacenter": "dc1",
+			},
+		}
+		labels, err := ui.getMetricLabels()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		labelsExpected := `{datacenter="dc1",env="prod",username="bearer_token:hash:44BC2CF5AD770999"}`
+		if labels != labelsExpected {
+			t.Fatalf("unexpected labels; got %s; want %s", labels, labelsExpected)
+		}
+	})
+	t.Run("invalid-label", func(t *testing.T) {
+		ui := &UserInfo{
+			Username: "foo",
+			MetricLabels: map[string]string{
+				",{": "aaaa",
+			},
+		}
+		_, err := ui.getMetricLabels()
+		if err == nil {
+			t.Fatalf("expecting non-nil error")
+		}
+	})
+}
+
 func isSetBool(boolP *bool, expectedValue bool) bool {
 	if boolP == nil {
 		return false
@@ -499,10 +655,10 @@ func isSetBool(boolP *bool, expectedValue bool) bool {
 	return *boolP == expectedValue
 }
 
-func getSrcPaths(paths []string) []*SrcPath {
-	var sps []*SrcPath
+func getRegexs(paths []string) []*Regex {
+	var sps []*Regex
 	for _, path := range paths {
-		sps = append(sps, &SrcPath{
+		sps = append(sps, &Regex{
 			sOriginal: path,
 			re:        regexp.MustCompile("^(?:" + path + ")$"),
 		})
@@ -549,4 +705,8 @@ func mustParseURLs(us []string) *URLPrefix {
 	return &URLPrefix{
 		bus: bus,
 	}
+}
+
+func intp(n int) *int {
+	return &n
 }
